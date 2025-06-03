@@ -12,6 +12,7 @@ import re
 import requests
 import mimetypes
 import datetime
+import pdfplumber
 
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.modify',
@@ -21,6 +22,7 @@ SCOPES = [
 
 SPREADSHEET_NAME = "ClearPayDB"
 SHEET_NAME = "Files"
+INV_SHEET_NAME = "Invoices"
 
 # Function to authenticate and build Gmail, Sheets, and Drive services
 def authenticate_services():
@@ -75,6 +77,7 @@ def log_file(mail_from, subject, filename, file_link, md5, sheets_service, sprea
         body={"values": [[mail_from, subject, filename, file_link, md5, datetime.datetime.now().isoformat()]]}
     ).execute()
     print(f"Logged {filename} in the spreadsheet.")
+    #-#process_invoice(filename, sheets_service)
 
 def is_file_logged(filename, md5, sheets_service, spreadsheet_id):
     sheet = sheets_service.spreadsheets()
@@ -140,6 +143,43 @@ def upload_file_to_drive(drive_service, folder_id, file_path):
     print(f"Shareable Link: {file_link}")
     return file_link
 
+def detect_invoice_type(file_path):
+    with pdfplumber.open(file_path) as pdf:
+        text = "\n".join(page.extract_text() for page in pdf.pages)
+
+    if "pango" in text and "תינובשח" in text:
+        return "Pango"
+    return "Unknown"
+
+# Function to process a Pango invoice
+def process_pango_invoice(file_path, sheets_service):
+    with pdfplumber.open(file_path) as pdf:
+        text = "\n".join(page.extract_text() for page in pdf.pages)
+
+    invoice_number = re.search(r"חשבונית מס/קבלה מספר: (\d+)", text).group(1)
+    invoice_date = re.search(r"(\d{2}\.\d{2}\.\d{4})", text).group(1)
+    customer_name = re.search(r"לכבוד\n(.*)\n", text).group(1)
+    customer_vat = re.search(r"(\d{9})", text).group(1)
+    total_amount = re.search(r"סה""כ לתשלום: (\d+\.\d{2})", text).group(1)
+
+    # Update Google Sheet
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{INV_SHEET_NAME}!A:E",
+        valueInputOption="RAW",
+        body={"values": [[invoice_number, invoice_date, customer_name, customer_vat, total_amount]]}
+    ).execute()
+
+    print(f"Processed Pango Invoice: {invoice_number}")
+
+# Meta function to process any invoice
+def process_invoice(file_path, sheets_service):
+    invoice_type = detect_invoice_type(file_path)
+
+    if invoice_type == "Pango":
+        process_pango_invoice(file_path, sheets_service)
+    else:
+        print("Unknown invoice type. Cannot process.")
 
 def download_attachments_or_links(service, sheets_service, drive_service, spreadsheet_id, messages, destination_dir, label_id, folder_id):
     if not os.path.exists(destination_dir):
